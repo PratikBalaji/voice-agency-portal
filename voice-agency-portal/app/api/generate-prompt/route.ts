@@ -1,91 +1,96 @@
-import { NextRequest, NextResponse } from 'next/server';
-import ollama from 'ollama';
-import fs from 'fs/promises';
-import path from 'path';
+import { NextResponse } from 'next/server';
+import { scrapeForDeepSeek } from '@/lib/scraper';
+import axios from 'axios';
 
-async function scrapeWebsite(url: string): Promise<string> {
+export async function POST(req: Request) {
     try {
-        const jinaUrl = `https://r.jina.ai/${url}`;
-        const response = await fetch(jinaUrl);
-
-        if (!response.ok) {
-            console.error(`Jina AI scraping failed for ${url}: ${response.statusText}`);
-            return `Failed to scrape website: ${response.statusText}`;
-        }
-
-        return await response.text();
-    } catch (error: any) {
-        console.error(`Error during website scraping for ${url}:`, error);
-        return `Error during website scraping: ${error.message}`;
-    }
-}
-
-export async function POST(req: NextRequest) {
-    try {
-        // No specific API key check for Ollama, as it's typically local.
-        // If your Ollama setup requires authentication, you would add it here.
         const body = await req.json();
-        const { businessName, sector, referenceUrl } = body;
+        // Accept both `url` (new) and `referenceUrl` (legacy) from the frontend
+        const {
+            businessName,
+            sector,
+            url,
+            referenceUrl,
+            additionalContext,
+        } = body;
 
-        if (!businessName || !sector || !referenceUrl) {
-            return new NextResponse(
-                JSON.stringify({ error: 'Missing businessName, sector, or referenceUrl in request body.' }),
-                { status: 400, headers: { 'Content-Type': 'application/json' } }
+        const targetUrl: string = url || referenceUrl;
+
+        if (!businessName || !sector || !targetUrl) {
+            return NextResponse.json(
+                { error: 'Missing required fields: businessName, sector, and url.' },
+                { status: 400 }
             );
         }
 
-        const scrapedWebsiteData = await scrapeWebsite(referenceUrl);
+        // 1. Scrape the target website locally with Playwright
+        console.log(`Starting scrape for ${targetUrl}...`);
+        const scrapedText = await scrapeForDeepSeek(targetUrl);
 
-        let localGuidelines = '';
-        const guidelinesPath = path.join(process.cwd(), 'guidelines.txt');
-        try {
-            localGuidelines = await fs.readFile(guidelinesPath, 'utf8');
-        } catch (readError: any) {
-            console.warn(`Could not read guidelines.txt at ${guidelinesPath}: ${readError.message}`);
-            localGuidelines = "No specific guidelines provided. Act as an expert Voice AI Architect.";
-        }
-
-        const systemPrompt = `You are an expert Voice AI Architect. Your goal is to create a highly optimized and effective Vapi system prompt for an AI agent.
-
-Use the following business information, scraped website data, and strict guidelines to formulate the prompt.
-
-Business Name: ${businessName}
-Sector: ${sector}
-Reference URL: ${referenceUrl}
-Scraped Website Data:
-\`\`\`markdown
-${scrapedWebsiteData}
-\`\`\`
-
-Strict Guidelines:
-\`\`\`
-${localGuidelines}
-\`\`\`
-
-Generate the Vapi system prompt:`;
-
-        try {
-            const response = await ollama.chat({
-                model: 'deepseek-r1:7b', // Using deepseek-coder:7b as per previous instruction.
-                messages: [{ role: 'user', content: systemPrompt }],
-            });
-
-            const generatedContent = response.message.content;
-
-            return NextResponse.json({ success: true, generatedContent });
-
-        } catch (llmError: any) {
-            console.error("Error communicating with Ollama:", llmError);
-            return new NextResponse(
-                JSON.stringify({ error: `Error generating prompt from LLM: ${llmError.message || 'An unknown error occurred.'}` }),
-                { status: 500, headers: { 'Content-Type': 'application/json' } }
+        if (!scrapedText) {
+            return NextResponse.json(
+                { error: 'Failed to scrape the website.' },
+                { status: 500 }
             );
         }
-    } catch (error) {
-        console.error("Error in generate-prompt API route:", error);
-        return new NextResponse(
-            JSON.stringify({ error: "An unexpected error occurred." }),
-            { status: 500, headers: { 'Content-Type': 'application/json' } }
+
+        // 2. The Master System Prompt for DeepSeek
+        const deepSeekPrompt = `
+You are a professional voice agent prompt engineer specializing in creating high-performance, instruction-based conversation agents.
+
+I need you to create a complete, deployment-ready voice agent prompt for a business called "${businessName}" in the "${sector}" sector.
+
+Here is the raw text scraped from their website:
+"""
+${scrapedText}
+"""
+
+Here are additional specific rules requested by the user:
+"""
+${additionalContext || 'No additional rules provided.'}
+"""
+
+YOUR TASK:
+Analyze the website data above. Figure out what the business does, who their customers are, their key services, and what makes them different. Then, generate a complete Voice Agent System Prompt using the exact structure below.
+
+If specific details (like exact common objections or precise target age) are not explicitly on the website, use your expert intuition to generate highly logical, industry-standard assumptions.
+
+THE REQUIRED OUTPUT STRUCTURE:
+Role - Define who the agent is and their purpose.
+Context - Explain the calling situation and expectations.
+Personality - Detailed personality and communication guidelines (Tone: Professional, helpful, natural).
+Task - Clear objectives and success criteria (e.g., qualifying leads, booking appointments).
+Conversation Stages - Stage-by-stage conversation progression with conditional logic.
+Information Collection - Systematic data gathering approach based on the business type.
+Objection Handling - Responses for common concerns likely for this industry.
+Critical Guidelines - Essential rules for natural conversation flow (one question at a time, active listening).
+
+OUTPUT INSTRUCTIONS:
+Do not include conversational filler in your response (e.g., "Here is the prompt"). Output ONLY the final, structured Voice Agent prompt ready to be pasted into Vapi.
+`;
+
+        // 3. Send the payload to the local Ollama/DeepSeek model
+        console.log('Sending data to DeepSeek...');
+        const aiResponse = await axios.post(
+            process.env.OLLAMA_API_URL || 'http://localhost:11434/api/generate',
+            {
+                model: process.env.MODEL_NAME || 'deepseek-r1:7b',
+                prompt: deepSeekPrompt,
+                stream: false,
+            }
+        );
+
+        const generatedPrompt: string = aiResponse.data.response;
+
+        // 4. Return the Vapi-ready prompt to the frontend
+        console.log('Prompt generated successfully!');
+        return NextResponse.json({ prompt: generatedPrompt });
+
+    } catch (error: any) {
+        console.error('API Error:', error.message);
+        return NextResponse.json(
+            { error: 'Failed to generate prompt.' },
+            { status: 500 }
         );
     }
 }

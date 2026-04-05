@@ -1,12 +1,13 @@
 import DiscoveryForm from '@/components/DiscoveryForm';
 
 export const metadata = {
-  title: 'AI Voice Agent Generator',
+  title: 'AI Voice Agency – Prompt Discovery & Deployment',
+  description: 'Generate and deploy AI voice agents for your business in seconds.',
 };
 
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-4 md:p-8 lg:p-16">
+    <main className="flex-1">
       <DiscoveryForm />
     </main>
   );
